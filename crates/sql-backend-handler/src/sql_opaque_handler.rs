@@ -71,14 +71,20 @@ impl LoginHandler for SqlBackendHandler {
             .await?
         {
             info!(r#"Login attempt for "{}""#, &request.name);
-            if passwords_match(
-                &password_hash,
-                &request.password,
-                &self.opaque_setup,
-                &request.name,
-            )
-            .is_ok()
-            {
+            // OPAQUE verification involves Argon2 + elliptic-curve operations and
+            // is deliberately CPU-intensive.  Running it synchronously inside an
+            // async task blocks the Tokio thread and serializes all concurrent
+            // bind requests.  Offloading to spawn_blocking lets Tokio schedule
+            // multiple verifications in parallel on the blocking thread pool.
+            let opaque_setup = self.opaque_setup.clone();
+            let username = request.name.clone();
+            let password = request.password.clone();
+            let matched = tokio::task::spawn_blocking(move || {
+                passwords_match(&password_hash, &password, &opaque_setup, &username).is_ok()
+            })
+            .await
+            .unwrap_or(false);
+            if matched {
                 return Ok(());
             }
         } else {
