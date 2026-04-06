@@ -32,7 +32,7 @@ use lldap_sql_backend_handler::{
     SqlBackendHandler, register_password,
     sql_tables::{self, get_private_key_info, set_private_key_info},
 };
-use sea_orm::{Database, DatabaseConnection, Statement};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use std::time::Duration;
 use tracing::{Instrument, Level, debug, error, info, instrument, span, warn};
 
