@@ -32,7 +32,7 @@ use lldap_sql_backend_handler::{
     SqlBackendHandler, register_password,
     sql_tables::{self, get_private_key_info, set_private_key_info},
 };
-use sea_orm::{Database, DatabaseConnection};
+use sea_orm::{Database, DatabaseConnection, Statement};
 use std::time::Duration;
 use tracing::{Instrument, Level, debug, error, info, instrument, span, warn};
 
@@ -102,12 +102,13 @@ async fn ensure_group_exists(handler: &SqlBackendHandler, group_name: &str) -> R
 }
 
 async fn setup_sql_tables(database_url: &DatabaseUrl) -> Result<DatabaseConnection> {
+    let is_sqlite = database_url.db_type() == "sqlite";
     let sql_pool = {
-        let num_connections = if database_url.db_type() == "sqlite" {
-            1
-        } else {
-            5
-        };
+        // WAL mode allows multiple concurrent readers on SQLite, so we can use
+        // more than one connection.  Concurrent LDAP binds (read-only SELECT of
+        // the OPAQUE password hash) no longer queue behind a single connection.
+        // Non-SQLite databases have their own connection pools; 5 is a safe default.
+        let num_connections = if is_sqlite { 4 } else { 5 };
         let mut sql_opt = sea_orm::ConnectOptions::new(database_url.to_string());
         sql_opt
             .max_connections(num_connections)
@@ -115,6 +116,24 @@ async fn setup_sql_tables(database_url: &DatabaseUrl) -> Result<DatabaseConnecti
             .sqlx_logging_level(log::LevelFilter::Debug);
         Database::connect(sql_opt).await?
     };
+    // Ensure WAL mode and a generous busy_timeout for SQLite so that
+    // concurrent writers back off and retry rather than failing immediately.
+    // WAL mode is also set by the NanoNAS deploy scripts (belt-and-suspenders).
+    if is_sqlite {
+        let backend = sql_pool.get_database_backend();
+        let _ = sql_pool
+            .execute(Statement::from_string(
+                backend,
+                "PRAGMA journal_mode=WAL".to_owned(),
+            ))
+            .await;
+        let _ = sql_pool
+            .execute(Statement::from_string(
+                backend,
+                "PRAGMA busy_timeout=5000".to_owned(),
+            ))
+            .await;
+    }
     sql_tables::init_table(&sql_pool)
         .await
         .context("while creating base tables")?;

@@ -1,0 +1,115 @@
+name: NanoNAS Release
+
+# Triggered by tags of the form `nanonas-v0.6.2.1` (upstream-version.patch-number).
+# Produces an amd64-lldap.tar.gz in the same layout as upstream releases so
+# that scripts/setup-lldap.sh needs no structural changes.
+
+on:
+  push:
+    tags:
+      - 'nanonas-v*'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  UPSTREAM_VERSION: v0.6.2   # web UI assets are fetched from this upstream release
+
+jobs:
+  build-binary:
+    name: Build x86_64 static binary
+    runs-on: ubuntu-latest
+    container:
+      image: lldap/rust-dev:latest
+      env:
+        CARGO_TERM_COLOR: always
+        RUSTFLAGS: -Ctarget-feature=+crt-static
+        CARGO_HOME: ${{ github.workspace }}/.cargo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cargo/bin
+            .cargo/registry/index
+            .cargo/registry/cache
+            .cargo/git/db
+            target
+          key: nanonas-lldap-x86_64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: nanonas-lldap-x86_64-
+
+      - name: Build lldap (x86_64 musl static)
+        run: |
+          cargo build \
+            --target=x86_64-unknown-linux-musl \
+            --release \
+            -p lldap
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lldap-x86_64-musl
+          path: target/x86_64-unknown-linux-musl/release/lldap
+
+  create-release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    needs: build-binary
+    permissions:
+      contents: write
+    steps:
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lldap-x86_64-musl
+          path: bin/
+
+      - name: Fetch upstream web UI assets
+        # The frontend (Yew/WASM) was not changed in this fork.
+        # Download it from the upstream release to avoid a full wasm-pack build.
+        run: |
+          curl -sSL \
+            "https://github.com/lldap/lldap/releases/download/${{ env.UPSTREAM_VERSION }}/amd64-lldap.tar.gz" \
+            -o upstream.tar.gz
+          tar xzf upstream.tar.gz
+          # upstream layout: amd64-lldap/{lldap,index.html,main.js,pkg/,...}
+
+      - name: Package amd64-lldap.tar.gz
+        run: |
+          mkdir -p release/amd64-lldap
+
+          # Our patched binary
+          cp bin/lldap release/amd64-lldap/lldap
+          chmod +x release/amd64-lldap/lldap
+
+          # Web UI from upstream (unchanged)
+          if [ -d amd64-lldap/app ]; then
+            cp -r amd64-lldap/app release/amd64-lldap/app
+          fi
+          for f in index.html main.js lldap_config.docker_template.toml; do
+            [ -f "amd64-lldap/$f" ] && cp "amd64-lldap/$f" "release/amd64-lldap/$f" || true
+          done
+          [ -d amd64-lldap/pkg ] && cp -r amd64-lldap/pkg release/amd64-lldap/pkg || true
+
+          cd release
+          tar -czvf amd64-lldap.tar.gz amd64-lldap/
+          sha256sum amd64-lldap.tar.gz > amd64-lldap.tar.gz.sha256
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            NanoNAS-patched LLDAP based on upstream ${{ env.UPSTREAM_VERSION }}.
+
+            **Changes vs upstream:**
+            - SQLite connection pool: 1 → 4 (WAL mode enables concurrent readers,
+              eliminating single-connection serialization during concurrent LDAP binds)
+            - SQLite WAL mode + busy_timeout=5000ms set at startup
+
+            **Measured improvement (10 concurrent logins):** ~1100ms → ~120ms
+          files: |
+            release/amd64-lldap.tar.gz
+            release/amd64-lldap.tar.gz.sha256
