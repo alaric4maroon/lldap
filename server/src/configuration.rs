@@ -114,6 +114,23 @@ pub struct Configuration {
     pub force_update_private_key: bool,
     #[builder(default = r#"DatabaseUrl::from("sqlite://users.db?mode=rwc")"#)]
     pub database_url: DatabaseUrl,
+    // NanoNAS performance tuning: SQLite connection pool size.
+    // WAL mode allows multiple concurrent readers; raising the pool above 1
+    // lets parallel LDAP binds (SELECT password_hash) avoid queueing.
+    // Has no effect for non-SQLite backends (they use pool_size=5).
+    // Env: LLDAP_SQLITE_POOL_SIZE
+    #[builder(default = "2")]
+    pub sqlite_pool_size: u32,
+    // NanoNAS performance tuning: enable WAL journal mode at startup.
+    // Belt-and-suspenders on top of NanoNAS deploy scripts.
+    // Env: LLDAP_SQLITE_WAL_MODE
+    #[builder(default = "true")]
+    pub sqlite_wal_mode: bool,
+    // NanoNAS performance tuning: SQLite busy_timeout in milliseconds.
+    // Writers retry instead of failing immediately with SQLITE_BUSY.
+    // Env: LLDAP_SQLITE_BUSY_TIMEOUT_MS
+    #[builder(default = "5000")]
+    pub sqlite_busy_timeout_ms: u32,
     #[builder(default)]
     pub ignored_user_attributes: Vec<AttributeName>,
     #[builder(default)]
